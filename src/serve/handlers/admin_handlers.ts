@@ -1815,6 +1815,8 @@ export async function handleAuditTimeline(
   }
 }
 
+let auditReloadInProgress = false;
+
 export async function handleServeReload(
   socket: WebSocket,
   ctx: ConnectionContext,
@@ -1878,6 +1880,34 @@ export async function handleServeReload(
           "Reloaded {count} trigger override(s) from serve.yaml (requested by {who})",
           { count: result.triggerOverridesChanged, who },
         );
+      }
+
+      if (ctx.auditEmitter && ctx.auditSinkRebuilder) {
+        if (auditReloadInProgress) {
+          logger.warn(
+            "Audit sink reload already in progress, skipping (requested by {who})",
+            { who },
+          );
+        } else {
+          auditReloadInProgress = true;
+          try {
+            const newSinks = await ctx.auditSinkRebuilder();
+            ctx.auditEmitter.replaceSinks(newSinks);
+            logger.info(
+              "Audit sinks reloaded: {count} sink(s) (requested by {who})",
+              { count: newSinks.length, who },
+            );
+          } catch (error: unknown) {
+            logger.warn(
+              "Audit sink hot-reload failed, keeping existing sinks: {error}",
+              {
+                error: error instanceof Error ? error.message : String(error),
+              },
+            );
+          } finally {
+            auditReloadInProgress = false;
+          }
+        }
       }
     }
 

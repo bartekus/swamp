@@ -20,10 +20,12 @@
 import type { ChainedAuditEvent } from "./audit_event.ts";
 import type { AuditStore } from "./audit_store.ts";
 import { CHAIN_SEED_DIGEST, verifyChain } from "./audit_chain.ts";
+import type { HmacKeyRegistry } from "./audit_hmac.ts";
 
 const MAX_QUERY_LIMIT = 1000;
 const MAX_DATE_RANGE_DAYS = 90;
 const MAX_LOADED_EVENTS = 50_000;
+const HMAC_HEX_PATTERN = /^[0-9a-f]{64}$/;
 
 export interface AuditQueryFilters {
   readonly since?: string;
@@ -38,6 +40,11 @@ export interface AuditQueryFilters {
   readonly export?: boolean;
 }
 
+export type AuditStreamFilters = Omit<
+  AuditQueryFilters,
+  "limit" | "cursor" | "export"
+>;
+
 export interface AuditQueryResult {
   readonly events: readonly ChainedAuditEvent[];
   readonly cursor?: string;
@@ -48,6 +55,9 @@ export interface AuditVerifyResult {
   readonly valid: boolean;
   readonly eventsChecked: number;
   readonly brokenAt?: number;
+  readonly hmacValid?: boolean;
+  readonly hmacChecked?: number;
+  readonly hmacFailed?: number;
   readonly message: string;
 }
 
@@ -121,9 +131,11 @@ function matchesFilters(
 
 export class AuditQueryService {
   readonly #store: AuditStore;
+  readonly #hmacKeyRegistry: HmacKeyRegistry | undefined;
 
-  constructor(store: AuditStore) {
+  constructor(store: AuditStore, hmacKeyRegistry?: HmacKeyRegistry) {
     this.#store = store;
+    this.#hmacKeyRegistry = hmacKeyRegistry;
   }
 
   async query(filters: AuditQueryFilters): Promise<AuditQueryResult> {
@@ -187,6 +199,7 @@ export class AuditQueryService {
       return {
         valid: true,
         eventsChecked: 0,
+        ...this.#hmacResult(allEvents),
         message: "No chained events found in the specified time range",
       };
     }
@@ -212,10 +225,13 @@ export class AuditQueryService {
 
     const result = await verifyChain(eventsToVerify, verifyStartDigest);
 
+    const hmac = this.#hmacResult(chainedEvents);
+
     if (result.valid) {
       return {
         valid: true,
         eventsChecked: eventsToVerify.length,
+        ...hmac,
         message:
           `Chain integrity verified: ${eventsToVerify.length} events, sequences ${
             chainedEvents[0].sequence
@@ -227,7 +243,104 @@ export class AuditQueryService {
       valid: false,
       eventsChecked: eventsToVerify.length,
       brokenAt: result.brokenAt,
+      ...hmac,
       message: `Chain integrity broken at sequence ${result.brokenAt}`,
     };
+  }
+
+  #hmacResult(
+    events: readonly ChainedAuditEvent[],
+  ): { hmacValid?: boolean; hmacChecked?: number; hmacFailed?: number } {
+    if (!this.#hmacKeyRegistry) return {};
+    const result = this.verifyHmac(events);
+    return {
+      hmacValid: result.valid,
+      hmacChecked: result.checked,
+      hmacFailed: result.failed,
+    };
+  }
+
+  // Structural HMAC verification: checks that each event's hmacKeyVersion
+  // references a known key and that all hashed fields (resourceName, detail,
+  // methodName, decision.resourceName) match the expected 64-char hex format.
+  // Full cryptographic re-verification is not possible because the original
+  // plaintext is not stored alongside the hash.
+  verifyHmac(
+    events: readonly ChainedAuditEvent[],
+  ): { valid: boolean; checked: number; failed: number } {
+    if (!this.#hmacKeyRegistry) {
+      return { valid: true, checked: 0, failed: 0 };
+    }
+    let checked = 0;
+    let failed = 0;
+    for (const event of events) {
+      if (event.hmacKeyVersion === undefined) continue;
+      checked++;
+      const ctx = this.#hmacKeyRegistry.contextForVersion(
+        event.hmacKeyVersion,
+      );
+      if (!ctx) {
+        failed++;
+        continue;
+      }
+      let fieldValid = true;
+      if (!HMAC_HEX_PATTERN.test(event.resourceName)) {
+        fieldValid = false;
+      }
+      if (event.detail !== undefined && !HMAC_HEX_PATTERN.test(event.detail)) {
+        fieldValid = false;
+      }
+      if (
+        event.methodName !== undefined &&
+        !HMAC_HEX_PATTERN.test(event.methodName)
+      ) {
+        fieldValid = false;
+      }
+      if (
+        event.decision?.resourceName !== undefined &&
+        !HMAC_HEX_PATTERN.test(event.decision.resourceName)
+      ) {
+        fieldValid = false;
+      }
+      if (!fieldValid) {
+        failed++;
+      }
+    }
+    return { valid: failed === 0, checked, failed };
+  }
+
+  async *queryStream(
+    filters: AuditStreamFilters,
+  ): AsyncGenerator<ChainedAuditEvent[]> {
+    const dates = dateRange(filters.since, filters.until);
+    if (dates.length > MAX_DATE_RANGE_DAYS) {
+      throw new Error(
+        `Date range too wide: ${dates.length} days exceeds maximum of ${MAX_DATE_RANGE_DAYS}`,
+      );
+    }
+
+    for (const date of dates) {
+      const keys = await this.#store.list(`events/${date}/`);
+      for (const key of keys) {
+        const data = await this.#store.get(key);
+        if (!data) continue;
+        const text = new TextDecoder().decode(data);
+        const batch: ChainedAuditEvent[] = [];
+        for (const line of text.split("\n")) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line) as ChainedAuditEvent;
+            if (matchesFilters(event, filters)) {
+              batch.push(event);
+            }
+          } catch {
+            // skip malformed lines
+          }
+        }
+        if (batch.length > 0) {
+          yield batch;
+        }
+      }
+    }
   }
 }

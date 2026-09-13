@@ -133,8 +133,13 @@ import { WebSocketSink } from "../../serve/audit_sinks/websocket_sink.ts";
 import { WebhookSink } from "../../serve/audit_sinks/webhook_sink.ts";
 import { SyslogSink } from "../../serve/audit_sinks/syslog_sink.ts";
 import {
+  type AlertRuleConfig,
+  AlertRuleEngine,
+  AuditSinkHotReloader,
   generateHmacKeyBytes,
   type HmacContext,
+  HmacKeyRegistry,
+  type HmacKeyVersion,
   importHmacKey,
   parseSinkFilter,
 } from "../../domain/serve_audit/mod.ts";
@@ -3079,6 +3084,7 @@ export const serveCommand = new Command()
         }
 
         let hmacContext: HmacContext | undefined;
+        let hmacKeyRegistry: HmacKeyRegistry | undefined;
         if (auditConfig.hmacEnabled && auditVaultService) {
           try {
             const vaultName = auditConfig.hmacVault;
@@ -3110,11 +3116,57 @@ export const serveCommand = new Command()
               rawKey.match(/.{2}/g)!.map((h) => parseInt(h, 16)),
             );
             const cryptoKey = await importHmacKey(keyBytes);
-            hmacContext = { key: cryptoKey, keyVersion: 1 };
-            logger.info("HMAC enabled for audit events");
+            const hmacKeyVersions: HmacKeyVersion[] = [{
+              version: 1,
+              key: cryptoKey,
+            }];
+            let versionNum = 2;
+            const maxVersionScan = 1000;
+            while (versionNum <= maxVersionScan) {
+              let versionedHex: string;
+              try {
+                versionedHex = await auditVaultService.get(
+                  vaultName,
+                  `${keyName}-v${versionNum}`,
+                );
+              } catch {
+                break;
+              }
+              if (
+                !/^[0-9a-f]+$/i.test(versionedHex) ||
+                versionedHex.length % 2 !== 0
+              ) {
+                logger.warn(
+                  "HMAC key version {version} in vault has invalid hex, skipping",
+                  { version: versionNum },
+                );
+                versionNum++;
+                continue;
+              }
+              const versionedBytes = new Uint8Array(
+                versionedHex.match(/.{2}/g)!.map((h) => parseInt(h, 16)),
+              );
+              const versionedKey = await importHmacKey(versionedBytes);
+              hmacKeyVersions.push({
+                version: versionNum,
+                key: versionedKey,
+              });
+              versionNum++;
+            }
+            const currentVersion =
+              hmacKeyVersions[hmacKeyVersions.length - 1].version;
+            hmacContext = {
+              key: hmacKeyVersions[hmacKeyVersions.length - 1].key,
+              keyVersion: currentVersion,
+            };
+            hmacKeyRegistry = new HmacKeyRegistry(hmacKeyVersions);
+            logger.info(
+              "HMAC enabled for audit events with {count} key version(s) (current: v{version})",
+              { count: hmacKeyVersions.length, version: currentVersion },
+            );
           } catch (error: unknown) {
-            logger.warn(
-              "Failed to initialize HMAC, continuing without: {error}",
+            logger.error(
+              "Failed to initialize HMAC for audit — events will NOT be HMAC-signed: {error}",
               {
                 error: error instanceof Error ? error.message : String(error),
               },
@@ -3127,6 +3179,7 @@ export const serveCommand = new Command()
           policy,
           chainState,
           hmacContext,
+          hmacKeyRegistry,
         });
         connectionCtx.auditStores = auditStores;
         connectionCtx.auditPolicy = policy;
@@ -3134,6 +3187,136 @@ export const serveCommand = new Command()
         connectionCtx.auditWal = wal;
         connectionCtx.auditWebSocketSink = webSocketSink;
         connectionCtx.auditNamespace = serveNamespace;
+        if (auditVaultService && auditConfig.hmacEnabled) {
+          connectionCtx.auditVaultService = auditVaultService;
+          connectionCtx.auditHmacConfig = {
+            vaultName: auditConfig.hmacVault,
+            keyName: auditConfig.hmacKey,
+          };
+        }
+
+        const capturedExternalSinks = auditSinks.filter(
+          (s) => s !== walSink && s !== webSocketSink,
+        );
+        let currentExternalSinks = capturedExternalSinks;
+        connectionCtx.auditSinkRebuilder = async () => {
+          const reloadedConfig = loadServeConfig(
+            options.config as string | undefined,
+            resolvedRepoDir,
+          );
+          const reloadedAudit = parseAuditConfig(reloadedConfig);
+          const newExtSinks: AuditSink[] = [];
+          if (reloadedAudit) {
+            for (const sinkEntry of reloadedAudit.sinks) {
+              if (sinkEntry.type === "webhook") {
+                const cfg = sinkEntry.config;
+                let auth: {
+                  type: "bearer" | "basic" | "header";
+                  value: string;
+                  headerName?: string;
+                } | undefined;
+                const authCfg = cfg.auth as
+                  | Record<string, unknown>
+                  | undefined;
+                if (authCfg) {
+                  const rawValue =
+                    (authCfg.token ?? authCfg.value ?? authCfg.password ??
+                      "") as string;
+                  const resolvedValue = await resolveSecret(
+                    rawValue,
+                    auditVaultService ?? undefined,
+                  );
+                  auth = {
+                    type: authCfg.type as "bearer" | "basic" | "header",
+                    value: resolvedValue,
+                    headerName: authCfg["header-name"] as string | undefined,
+                  };
+                }
+                const batchCfg = cfg.batch as
+                  | Record<string, unknown>
+                  | undefined;
+                const retryCfg = cfg.retry as
+                  | Record<string, unknown>
+                  | undefined;
+                newExtSinks.push(
+                  new WebhookSink({
+                    url: cfg.url as string,
+                    format: (cfg.format as "json" | "cef") ?? "json",
+                    auth,
+                    filter: parseSinkFilter(cfg),
+                    batchSize: batchCfg?.size as number | undefined,
+                    batchIntervalMs: batchCfg?.["interval-ms"] as
+                      | number
+                      | undefined,
+                    maxAttempts: retryCfg?.["max-attempts"] as
+                      | number
+                      | undefined,
+                    backoffMs: retryCfg?.["backoff-ms"] as number | undefined,
+                    maxPending: cfg["max-pending"] as number | undefined,
+                    signal: ac.signal,
+                    namespace: serveNamespace,
+                  }),
+                );
+              } else if (sinkEntry.type === "syslog") {
+                const cfg = sinkEntry.config;
+                const transport = (cfg.transport as string | undefined) ??
+                  "tcp";
+                let caCert: string | undefined;
+                if (transport === "tcp+tls" && cfg["ca-cert"]) {
+                  caCert = await resolveSecret(
+                    cfg["ca-cert"] as string,
+                    auditVaultService ?? undefined,
+                  );
+                }
+                newExtSinks.push(
+                  new SyslogSink({
+                    host: cfg.host as string,
+                    port: cfg.port as number,
+                    transport: transport as "tcp" | "tcp+tls" | "udp",
+                    filter: parseSinkFilter(cfg),
+                    caCert,
+                    signal: ac.signal,
+                  }),
+                );
+              }
+            }
+          }
+          const hotReloader = new AuditSinkHotReloader();
+          const result = await hotReloader.reload(
+            currentExternalSinks,
+            () => Promise.resolve(newExtSinks),
+          );
+          currentExternalSinks = result;
+          return [walSink, webSocketSink, ...result];
+        };
+
+        if (auditConfig.alerts.length > 0) {
+          const alertConfigs: AlertRuleConfig[] = auditConfig.alerts.map(
+            (a) => ({
+              name: a.name,
+              description: a.description,
+              match: {
+                category: a.match.category,
+                action: a.match.action,
+                outcome: a.match.outcome,
+                principal: a.match.principal,
+              },
+              threshold: {
+                count: a.threshold.count,
+                windowSeconds: a.threshold["window-seconds"],
+              },
+              action: a.action.type === "webhook"
+                ? { type: "webhook" as const, url: a.action.url! }
+                : { type: "log" as const },
+            }),
+          );
+          connectionCtx.auditEmitter!.alertEngine = new AlertRuleEngine(
+            alertConfigs,
+          );
+          logger.info("Audit alert engine enabled with {count} rule(s)", {
+            count: alertConfigs.length,
+          });
+        }
 
         logger.info(
           "Audit pipeline enabled with {count} store target(s), {sinkCount} sink(s), WAL at {walDir}",

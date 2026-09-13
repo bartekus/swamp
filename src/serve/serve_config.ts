@@ -145,6 +145,7 @@ export interface ServeConfigFile {
       enabled?: boolean;
     };
     sinks?: Array<Record<string, unknown>>;
+    alerts?: Array<Record<string, unknown>>;
   };
 }
 
@@ -176,11 +177,31 @@ export interface AuditConfig {
   readonly hmacKey: string;
   readonly hmacEnabled: boolean;
   readonly sinks: readonly AuditSinkConfigEntry[];
+  readonly alerts: readonly AlertRuleConfigEntry[];
 }
 
 export interface AuditSinkConfigEntry {
   readonly type: "webhook" | "syslog";
   readonly config: Record<string, unknown>;
+}
+
+export interface AlertRuleConfigEntry {
+  readonly name: string;
+  readonly description?: string;
+  readonly match: {
+    readonly category?: string;
+    readonly action?: string;
+    readonly outcome?: string;
+    readonly principal?: string;
+  };
+  readonly threshold: {
+    readonly count: number;
+    readonly "window-seconds": number;
+  };
+  readonly action: {
+    readonly type: "webhook" | "log";
+    readonly url?: string;
+  };
 }
 
 // ── Known Keys ────────────────────────────────────────────────────────
@@ -1183,6 +1204,7 @@ export async function writeServeConfigFile(
 const KNOWN_AUDIT_KEYS = new Set([
   "stores",
   "sinks",
+  "alerts",
   "batch-size",
   "flush-interval",
   "fail-open",
@@ -1519,6 +1541,80 @@ function validateAuditConfig(audit: unknown, path: string): void {
       }
     }
   }
+
+  if (obj.alerts !== undefined) {
+    if (!Array.isArray(obj.alerts)) {
+      throw new UserError(
+        `Invalid audit.alerts in ${path}: expected array`,
+      );
+    }
+    for (let i = 0; i < obj.alerts.length; i++) {
+      const alert = obj.alerts[i];
+      if (typeof alert !== "object" || alert === null || Array.isArray(alert)) {
+        throw new UserError(
+          `Invalid audit.alerts[${i}] in ${path}: expected object`,
+        );
+      }
+      const a = alert as Record<string, unknown>;
+      if (typeof a.name !== "string" || a.name.length === 0) {
+        throw new UserError(
+          `Invalid audit.alerts[${i}].name in ${path}: required string`,
+        );
+      }
+      if (typeof a.match !== "object" || a.match === null) {
+        throw new UserError(
+          `Invalid audit.alerts[${i}].match in ${path}: required object`,
+        );
+      }
+      if (typeof a.threshold !== "object" || a.threshold === null) {
+        throw new UserError(
+          `Invalid audit.alerts[${i}].threshold in ${path}: required object`,
+        );
+      }
+      const threshold = a.threshold as Record<string, unknown>;
+      if (
+        typeof threshold.count !== "number" ||
+        !Number.isInteger(threshold.count) || threshold.count <= 0
+      ) {
+        throw new UserError(
+          `Invalid audit.alerts[${i}].threshold.count in ${path}: expected positive integer`,
+        );
+      }
+      if (
+        typeof threshold["window-seconds"] !== "number" ||
+        threshold["window-seconds"] <= 0
+      ) {
+        throw new UserError(
+          `Invalid audit.alerts[${i}].threshold.window-seconds in ${path}: expected positive number`,
+        );
+      }
+      if (typeof a.action !== "object" || a.action === null) {
+        throw new UserError(
+          `Invalid audit.alerts[${i}].action in ${path}: required object`,
+        );
+      }
+      const action = a.action as Record<string, unknown>;
+      if (action.type !== "webhook" && action.type !== "log") {
+        throw new UserError(
+          `Invalid audit.alerts[${i}].action.type in ${path}: expected one of webhook, log`,
+        );
+      }
+      if (action.type === "webhook") {
+        if (typeof action.url !== "string") {
+          throw new UserError(
+            `Invalid audit.alerts[${i}].action.url in ${path}: webhook action requires a url`,
+          );
+        }
+        try {
+          new URL(action.url);
+        } catch {
+          throw new UserError(
+            `Invalid audit.alerts[${i}].action.url in ${path}: "${action.url}" is not a valid URL`,
+          );
+        }
+      }
+    }
+  }
 }
 
 export function parseAuditConfig(
@@ -1550,6 +1646,34 @@ export function parseAuditConfig(
     }
   }
 
+  const alerts: AlertRuleConfigEntry[] = [];
+  if (audit.alerts) {
+    for (const raw of audit.alerts) {
+      const r = raw as Record<string, unknown>;
+      const match = r.match as Record<string, unknown>;
+      const threshold = r.threshold as Record<string, unknown>;
+      const action = r.action as Record<string, unknown>;
+      alerts.push({
+        name: r.name as string,
+        description: r.description as string | undefined,
+        match: {
+          category: match.category as string | undefined,
+          action: match.action as string | undefined,
+          outcome: match.outcome as string | undefined,
+          principal: match.principal as string | undefined,
+        },
+        threshold: {
+          count: threshold.count as number,
+          "window-seconds": threshold["window-seconds"] as number,
+        },
+        action: {
+          type: action.type as "webhook" | "log",
+          url: action.url as string | undefined,
+        },
+      });
+    }
+  }
+
   return {
     stores: audit.stores,
     batchSize: audit["batch-size"] ?? 100,
@@ -1563,6 +1687,7 @@ export function parseAuditConfig(
     hmacKey: audit.hmac?.key ?? "hmac-key",
     hmacEnabled: audit.hmac?.enabled ?? false,
     sinks,
+    alerts,
   };
 }
 

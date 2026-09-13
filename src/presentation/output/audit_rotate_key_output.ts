@@ -17,13 +17,13 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with Swamp.  If not, see <https://www.gnu.org/licenses/>.
 
-import { bold, dim, green, red } from "@std/fmt/colors";
+import { bold, dim, green, yellow } from "@std/fmt/colors";
 import { writeOutput } from "../../infrastructure/logging/logger.ts";
-import type { AuditVerifyResponse } from "../../serve/protocol.ts";
+import type { AuditRotateKeyResponse } from "../../serve/protocol.ts";
 import type { OutputMode } from "./output.ts";
 
-export function renderAuditVerify(
-  data: AuditVerifyResponse,
+export function renderAuditRotateKey(
+  data: AuditRotateKeyResponse,
   mode: OutputMode,
 ): void {
   if (mode === "json") {
@@ -31,35 +31,20 @@ export function renderAuditVerify(
     return;
   }
 
-  if (data.valid) {
+  if (data.previousVersion === 0 && data.newVersion === 0) {
     writeOutput(
-      `${green("✓")} ${
-        bold("Chain integrity verified")
-      }: ${data.eventsChecked} events checked`,
+      `${yellow("⚠")} ${
+        bold("HMAC is not enabled")
+      } — no key rotation performed`,
     );
     if (data.message) writeOutput(dim(data.message));
-  } else {
-    writeOutput(
-      `${red("✗")} ${bold("Chain integrity broken")} at sequence ${
-        data.brokenAt ?? "unknown"
-      }: ${data.eventsChecked} events checked`,
-    );
-    if (data.message) writeOutput(dim(data.message));
+    return;
   }
 
-  if (data.hmacChecked !== undefined) {
-    if (data.hmacValid) {
-      writeOutput(
-        `${green("✓")} ${
-          bold("HMAC integrity verified")
-        }: ${data.hmacChecked} events checked`,
-      );
-    } else {
-      writeOutput(
-        `${red("✗")} ${bold("HMAC integrity failed")}: ${
-          data.hmacFailed ?? 0
-        } of ${data.hmacChecked} events failed verification`,
-      );
-    }
-  }
+  writeOutput(
+    `${green("✓")} ${
+      bold("HMAC key rotated")
+    }: version ${data.previousVersion} → ${data.newVersion}`,
+  );
+  if (data.message) writeOutput(dim(data.message));
 }
