@@ -1653,6 +1653,8 @@ export class WorkflowExecutionService {
       instanceId?: string;
       /** How this run was triggered (schedule, webhook, api) */
       triggerSource?: string;
+      /** Optional metadata linking the run to external systems */
+      references?: Record<string, string>;
     },
   ): AsyncGenerator<WorkflowExecutionEvent> {
     const tracer = getTracer();
@@ -1739,6 +1741,9 @@ export class WorkflowExecutionService {
         if (options?.inputs) {
           run.captureInputs(options.inputs);
         }
+        if (options?.references) {
+          run.setReferences(options.references);
+        }
         workflowRun = run;
         if (workflow.affinity) {
           workflowAffinityKey = run.id;
@@ -1793,7 +1798,10 @@ export class WorkflowExecutionService {
             workflowName: workflow.name,
             startedAt: run.startedAt!.toISOString(),
             tags: { ...run.tags },
+            initiatedBy: run.initiatedBy,
+            inputs: run.inputs,
           };
+          expressionContext.steps = {};
         }
       } finally {
         wfSetupSpan.end();
@@ -2227,7 +2235,23 @@ export class WorkflowExecutionService {
       workflowName: workflow.name,
       startedAt: existingRun.startedAt!.toISOString(),
       tags: { ...existingRun.tags },
+      initiatedBy: existingRun.initiatedBy,
+      inputs: existingRun.inputs,
     };
+    expressionContext.steps = {};
+    for (const job of existingRun.jobs) {
+      for (const step of job.steps) {
+        if (
+          step.status === "succeeded" || step.status === "failed" ||
+          step.status === "skipped"
+        ) {
+          expressionContext.steps[step.stepName] = {
+            status: step.status,
+            outputs: this.extractStepOutputsForContext(step),
+          };
+        }
+      }
+    }
 
     const evaluator = new WorkflowExpressionEvaluator(
       new CelEvaluator(),
@@ -2788,6 +2812,12 @@ export class WorkflowExecutionService {
           error: stepRun.assertResult.error,
         };
       }
+      if (expressionContext?.steps) {
+        expressionContext.steps[stepName] = {
+          status: stepRun.status,
+          outputs: this.extractStepOutputsForContext(stepRun),
+        };
+      }
       stepSpan.end();
       return;
     }
@@ -3299,6 +3329,17 @@ export class WorkflowExecutionService {
       // Do not re-throw: merge() continues draining all step generators
       // (allSettled semantics). The job generator tracks failure via step_failed events.
     } finally {
+      if (
+        stepExprContext?.steps &&
+        (stepRun.status === "succeeded" || stepRun.status === "failed" ||
+          stepRun.status === "skipped")
+      ) {
+        const stepOutputs = this.extractStepOutputsForContext(stepRun);
+        stepExprContext.steps[stepName] = {
+          status: stepRun.status,
+          outputs: stepOutputs,
+        };
+      }
       stepSpan.end();
     }
   }
@@ -3494,11 +3535,13 @@ export class WorkflowExecutionService {
       return;
     }
 
+    const childOutputs = this.extractChildWorkflowOutputs(childRun);
     stepRun.succeed({
       type: "workflow",
       workflow: task.workflowIdOrName,
       runId: childRun.id,
       status: childRun.status,
+      outputs: childOutputs,
     });
     yield { kind: "step_completed", jobId: job.name, stepId: stepName };
   }
@@ -3571,6 +3614,48 @@ export class WorkflowExecutionService {
         return result;
       },
     };
+  }
+
+  private extractStepOutputsForContext(
+    stepRun: import("./workflow_run.ts").StepRun,
+  ): Record<string, unknown> | undefined {
+    const output = stepRun.output as Record<string, unknown> | undefined;
+    if (!output || typeof output !== "object") return undefined;
+    if (output.type === "model_method") {
+      const attrs = output.resourceAttributes as
+        | Record<string, unknown>
+        | undefined;
+      return attrs && Object.keys(attrs).length > 0 ? attrs : undefined;
+    }
+    if (output.type === "workflow") {
+      const outputs = output.outputs as
+        | Record<string, unknown>
+        | undefined;
+      return outputs && Object.keys(outputs).length > 0 ? outputs : undefined;
+    }
+    return undefined;
+  }
+
+  private extractChildWorkflowOutputs(
+    childRun: WorkflowRun,
+  ): Record<string, Record<string, unknown>> | undefined {
+    const outputs: Record<string, Record<string, unknown>> = {};
+    for (const job of childRun.jobs) {
+      for (const step of job.steps) {
+        if (step.status !== "succeeded") continue;
+        const stepOutput = step.output as Record<string, unknown> | undefined;
+        if (!stepOutput || typeof stepOutput !== "object") continue;
+        if (stepOutput.type === "model_method") {
+          const attrs = stepOutput.resourceAttributes as
+            | Record<string, unknown>
+            | undefined;
+          if (attrs && Object.keys(attrs).length > 0) {
+            outputs[step.stepName] = attrs;
+          }
+        }
+      }
+    }
+    return Object.keys(outputs).length > 0 ? outputs : undefined;
   }
 
   private shouldJobRun(job: Job, run: WorkflowRun): boolean {
