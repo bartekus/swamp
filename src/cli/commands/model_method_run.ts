@@ -76,7 +76,7 @@ import {
 } from "../../libswamp/mod.ts";
 import { createModelMethodRunRenderer } from "../../presentation/renderers/model_method_run.ts";
 import {
-  resolveServerToken,
+  resolveServerTokenFromOptions,
   resolveServeUrl,
   runModelMethodOverServer,
 } from "../remote_run.ts";
@@ -212,6 +212,10 @@ Exit codes: 0 = success, 1 = general error, 75 = lock contention (temporary — 
   .option(
     "--token <token:string>",
     "Server token in <name>.<secret> format; only applies with --server (overrides stored credentials and SWAMP_SERVER_TOKEN)",
+  )
+  .option(
+    "--token-file <path:string>",
+    "Path to a file containing the server token; mutually exclusive with --token (env: SWAMP_SERVER_TOKEN_FILE)",
   )
   .option(
     "--traceparent <value:string>",
@@ -607,9 +611,9 @@ async function runMethodViaServer(
     )
     : [cliInputs];
 
-  const token = await resolveServerToken(
+  const token = await resolveServerTokenFromOptions(
     options.server as string,
-    options.token as string | undefined,
+    options,
   );
 
   try {

@@ -87,7 +87,7 @@ import { JUnitWorkflowRunRenderer } from "../../presentation/renderers/workflow_
 import { isAuthenticated, resolveCliInitiatedBy } from "../auth_context.ts";
 import { getActiveTelemetryService } from "../telemetry_integration.ts";
 import {
-  resolveServerToken,
+  resolveServerTokenFromOptions,
   resolveServeUrl,
   runWorkflowOverServer,
 } from "../remote_run.ts";
@@ -207,6 +207,10 @@ export const workflowRunCommand = new Command()
   .option(
     "--token <token:string>",
     "Server token in <name>.<secret> format; only applies with --server (overrides stored credentials and SWAMP_SERVER_TOKEN)",
+  )
+  .option(
+    "--token-file <path:string>",
+    "Path to a file containing the server token; mutually exclusive with --token (env: SWAMP_SERVER_TOKEN_FILE)",
   )
   .option(
     "--traceparent <value:string>",
@@ -642,9 +646,9 @@ async function runWorkflowViaServer(
     )
     : [cliInputs];
 
-  const token = await resolveServerToken(
+  const token = await resolveServerTokenFromOptions(
     options.server as string,
-    options.token as string | undefined,
+    options,
   );
 
   try {

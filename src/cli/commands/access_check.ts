@@ -39,7 +39,7 @@ import {
 import { createAccessCheckRenderer } from "../../presentation/renderers/access_check.ts";
 import {
   requestServerResponse,
-  resolveServerToken,
+  resolveServerTokenFromOptions,
   resolveServeUrl,
 } from "../../cli/remote_run.ts";
 import type { AccessCheckResponse } from "../../serve/protocol.ts";
@@ -105,6 +105,10 @@ export const accessCheckCommand = new Command()
     "--token <token:string>",
     "Server token; only applies with --server (falls back to stored credential or SWAMP_SERVER_TOKEN)",
   )
+  .option(
+    "--token-file <path:string>",
+    "Path to a file containing the server token; mutually exclusive with --token (env: SWAMP_SERVER_TOKEN_FILE)",
+  )
   .action(async function (options: AnyOptions) {
     const server = resolveServeUrl(options.server as string | undefined);
 
@@ -135,9 +139,9 @@ export const accessCheckCommand = new Command()
         "check",
       ]);
 
-      const token = await resolveServerToken(
+      const token = await resolveServerTokenFromOptions(
         server,
-        options.token as string | undefined,
+        options,
       );
 
       const response = await requestServerResponse<AccessCheckResponse>(

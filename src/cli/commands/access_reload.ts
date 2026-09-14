@@ -31,7 +31,7 @@ import { EventBus } from "../../domain/events/event_bus.ts";
 import { validateServerRepoExclusivity } from "./access_helpers.ts";
 import {
   requestServerResponse,
-  resolveServerToken,
+  resolveServerTokenFromOptions,
   resolveServeUrl,
 } from "../../cli/remote_run.ts";
 import type { AccessReloadResponse } from "../../serve/protocol.ts";
@@ -62,6 +62,10 @@ export const accessReloadCommand = new Command()
     "--token <token:string>",
     "Server token; only applies with --server (falls back to stored credential or SWAMP_SERVER_TOKEN)",
   )
+  .option(
+    "--token-file <path:string>",
+    "Path to a file containing the server token; mutually exclusive with --token (env: SWAMP_SERVER_TOKEN_FILE)",
+  )
   .action(async function (options: AnyOptions) {
     const server = resolveServeUrl(options.server as string | undefined);
 
@@ -78,9 +82,9 @@ export const accessReloadCommand = new Command()
     const renderer = createAccessReloadRenderer(ctx.outputMode);
 
     if (server) {
-      const token = await resolveServerToken(
+      const token = await resolveServerTokenFromOptions(
         server,
-        options.token as string | undefined,
+        options,
       );
 
       const response = await requestServerResponse<AccessReloadResponse>(

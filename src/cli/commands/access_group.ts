@@ -62,7 +62,7 @@ import type { ModelMethodRunEvent } from "../../libswamp/mod.ts";
 import { isCustomDatastoreConfig } from "../../domain/datastore/datastore_config.ts";
 import {
   requestServerResponse,
-  resolveServerToken,
+  resolveServerTokenFromOptions,
   resolveServeUrl,
   runModelMethodOverServer,
 } from "../../cli/remote_run.ts";
@@ -233,6 +233,10 @@ const accessGroupCreateCommand = new Command()
     "--token <token:string>",
     "Server token; only applies with --server (falls back to stored credential or SWAMP_SERVER_TOKEN)",
   )
+  .option(
+    "--token-file <path:string>",
+    "Path to a file containing the server token; mutually exclusive with --token (env: SWAMP_SERVER_TOKEN_FILE)",
+  )
   .action(async function (options: AnyOptions, name: string) {
     const server = resolveServeUrl(options.server as string | undefined);
 
@@ -247,9 +251,9 @@ const accessGroupCreateCommand = new Command()
         "group",
         "create",
       ]);
-      const token = await resolveServerToken(
+      const token = await resolveServerTokenFromOptions(
         server,
-        options.token as string | undefined,
+        options,
       );
       const renderer = createModelMethodRunRenderer(ctx.outputMode, {
         modelName: name,
@@ -306,6 +310,10 @@ const accessGroupAddMemberCommand = new Command()
     "--token <token:string>",
     "Server token; only applies with --server (falls back to stored credential or SWAMP_SERVER_TOKEN)",
   )
+  .option(
+    "--token-file <path:string>",
+    "Path to a file containing the server token; mutually exclusive with --token (env: SWAMP_SERVER_TOKEN_FILE)",
+  )
   .action(async function (
     options: AnyOptions,
     group: string,
@@ -324,9 +332,9 @@ const accessGroupAddMemberCommand = new Command()
         "group",
         "add-member",
       ]);
-      const token = await resolveServerToken(
+      const token = await resolveServerTokenFromOptions(
         server,
-        options.token as string | undefined,
+        options,
       );
       const renderer = createModelMethodRunRenderer(ctx.outputMode, {
         modelName: group,
@@ -381,6 +389,10 @@ const accessGroupRemoveMemberCommand = new Command()
     "--token <token:string>",
     "Server token; only applies with --server (falls back to stored credential or SWAMP_SERVER_TOKEN)",
   )
+  .option(
+    "--token-file <path:string>",
+    "Path to a file containing the server token; mutually exclusive with --token (env: SWAMP_SERVER_TOKEN_FILE)",
+  )
   .action(async function (
     options: AnyOptions,
     group: string,
@@ -399,9 +411,9 @@ const accessGroupRemoveMemberCommand = new Command()
         "group",
         "remove-member",
       ]);
-      const token = await resolveServerToken(
+      const token = await resolveServerTokenFromOptions(
         server,
-        options.token as string | undefined,
+        options,
       );
       const renderer = createModelMethodRunRenderer(ctx.outputMode, {
         modelName: group,
@@ -452,6 +464,10 @@ const accessGroupListCommand = new Command()
     "--token <token:string>",
     "Server token; only applies with --server (falls back to stored credential or SWAMP_SERVER_TOKEN)",
   )
+  .option(
+    "--token-file <path:string>",
+    "Path to a file containing the server token; mutually exclusive with --token (env: SWAMP_SERVER_TOKEN_FILE)",
+  )
   .action(async function (options: AnyOptions) {
     const server = resolveServeUrl(options.server as string | undefined);
 
@@ -466,9 +482,9 @@ const accessGroupListCommand = new Command()
         "group",
         "list",
       ]);
-      const token = await resolveServerToken(
+      const token = await resolveServerTokenFromOptions(
         server,
-        options.token as string | undefined,
+        options,
       );
       const response = await requestServerResponse<AccessGroupListResponse>(
         { server, ...(token ? { token } : {}) },
@@ -521,6 +537,10 @@ const accessGroupMembersCommand = new Command()
     "--token <token:string>",
     "Server token; only applies with --server (falls back to stored credential or SWAMP_SERVER_TOKEN)",
   )
+  .option(
+    "--token-file <path:string>",
+    "Path to a file containing the server token; mutually exclusive with --token (env: SWAMP_SERVER_TOKEN_FILE)",
+  )
   .action(async function (options: AnyOptions, name: string) {
     const server = resolveServeUrl(options.server as string | undefined);
 
@@ -535,9 +555,9 @@ const accessGroupMembersCommand = new Command()
         "group",
         "members",
       ]);
-      const token = await resolveServerToken(
+      const token = await resolveServerTokenFromOptions(
         server,
-        options.token as string | undefined,
+        options,
       );
       const response = await requestServerResponse<AccessGroupListResponse>(
         { server, ...(token ? { token } : {}) },
@@ -598,6 +618,10 @@ const accessGroupListIdpCommand = new Command()
     "--token <token:string>",
     "Server token (falls back to stored credential or SWAMP_SERVER_TOKEN)",
   )
+  .option(
+    "--token-file <path:string>",
+    "Path to a file containing the server token; mutually exclusive with --token (env: SWAMP_SERVER_TOKEN_FILE)",
+  )
   .action(async function (options: AnyOptions) {
     const server = resolveServeUrl(options.server as string | undefined);
     if (!server) {
@@ -611,9 +635,9 @@ const accessGroupListIdpCommand = new Command()
       "group",
       "list-idp",
     ]);
-    const token = await resolveServerToken(
+    const token = await resolveServerTokenFromOptions(
       server,
-      options.token as string | undefined,
+      options,
     );
     const response = await requestServerResponse<AccessGroupListIdpResponse>(
       { server, ...(token ? { token } : {}) },

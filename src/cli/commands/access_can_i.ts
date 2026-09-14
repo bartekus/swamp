@@ -22,7 +22,7 @@ import { createContext, type GlobalOptions } from "../context.ts";
 import { UserError } from "../../domain/errors.ts";
 import {
   requestServerResponse,
-  resolveServerToken,
+  resolveServerTokenFromOptions,
   resolveServeUrl,
 } from "../../cli/remote_run.ts";
 import type { AccessCanIResponse } from "../../serve/protocol.ts";
@@ -54,6 +54,10 @@ export const accessCanICommand = new Command()
   .option(
     "--token <token:string>",
     "Server token; only applies with --server (falls back to stored credential or SWAMP_SERVER_TOKEN)",
+  )
+  .option(
+    "--token-file <path:string>",
+    "Path to a file containing the server token; mutually exclusive with --token (env: SWAMP_SERVER_TOKEN_FILE)",
   )
   .option(
     "--action <action:string>",
@@ -95,9 +99,9 @@ export const accessCanICommand = new Command()
         .filter((c: string) => c.length > 0)
       : undefined;
 
-    const token = await resolveServerToken(
+    const token = await resolveServerTokenFromOptions(
       server,
-      options.token as string | undefined,
+      options,
     );
 
     const response = await requestServerResponse<AccessCanIResponse>(

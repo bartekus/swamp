@@ -61,7 +61,7 @@ import type { ModelMethodRunEvent } from "../../libswamp/mod.ts";
 import { isCustomDatastoreConfig } from "../../domain/datastore/datastore_config.ts";
 import {
   requestServerResponse,
-  resolveServerToken,
+  resolveServerTokenFromOptions,
   resolveServeUrl,
   runModelMethodOverServer,
 } from "../../cli/remote_run.ts";
@@ -136,6 +136,10 @@ const accessGrantCreateCommand = new Command()
     "--token <token:string>",
     "Server token; only applies with --server (falls back to stored credential or SWAMP_SERVER_TOKEN)",
   )
+  .option(
+    "--token-file <path:string>",
+    "Path to a file containing the server token; mutually exclusive with --token (env: SWAMP_SERVER_TOKEN_FILE)",
+  )
   .action(async function (options: AnyOptions) {
     if (!options.allow && !options.deny) {
       throw new UserError("Either --allow or --deny must be specified");
@@ -169,9 +173,9 @@ const accessGrantCreateCommand = new Command()
         "grant",
         "create",
       ]);
-      const token = await resolveServerToken(
+      const token = await resolveServerTokenFromOptions(
         server,
-        options.token as string | undefined,
+        options,
       );
       const renderer = createModelMethodRunRenderer(ctx.outputMode, {
         modelName: instanceName,
@@ -349,6 +353,10 @@ const accessGrantListCommand = new Command()
     "--token <token:string>",
     "Server token; only applies with --server (falls back to stored credential or SWAMP_SERVER_TOKEN)",
   )
+  .option(
+    "--token-file <path:string>",
+    "Path to a file containing the server token; mutually exclusive with --token (env: SWAMP_SERVER_TOKEN_FILE)",
+  )
   .action(async function (options: AnyOptions) {
     const server = resolveServeUrl(options.server as string | undefined);
 
@@ -363,9 +371,9 @@ const accessGrantListCommand = new Command()
         "grant",
         "list",
       ]);
-      const token = await resolveServerToken(
+      const token = await resolveServerTokenFromOptions(
         server,
-        options.token as string | undefined,
+        options,
       );
       const response = await requestServerResponse<AccessGrantListResponse>(
         { server, ...(token ? { token } : {}) },
@@ -446,6 +454,10 @@ const accessGrantRevokeCommand = new Command()
     "--token <token:string>",
     "Server token; only applies with --server (falls back to stored credential or SWAMP_SERVER_TOKEN)",
   )
+  .option(
+    "--token-file <path:string>",
+    "Path to a file containing the server token; mutually exclusive with --token (env: SWAMP_SERVER_TOKEN_FILE)",
+  )
   .action(async function (options: AnyOptions, grantId: string) {
     const server = resolveServeUrl(options.server as string | undefined);
 
@@ -460,9 +472,9 @@ const accessGrantRevokeCommand = new Command()
         "grant",
         "revoke",
       ]);
-      const token = await resolveServerToken(
+      const token = await resolveServerTokenFromOptions(
         server,
-        options.token as string | undefined,
+        options,
       );
       const response = await requestServerResponse<AccessGrantListResponse>(
         { server, ...(token ? { token } : {}) },
