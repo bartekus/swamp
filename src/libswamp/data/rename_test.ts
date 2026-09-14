@@ -29,6 +29,7 @@ import {
 import { CatalogStore } from "../../infrastructure/persistence/catalog_store.ts";
 import { FileSystemUnifiedDataRepository } from "../../infrastructure/persistence/unified_data_repository.ts";
 import { catalogDbPath } from "../../infrastructure/persistence/repository_factory.ts";
+import { YamlDefinitionRepository } from "../../infrastructure/persistence/yaml_definition_repository.ts";
 
 async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = await Deno.makeTempDir({ prefix: "swamp-test-" });
@@ -76,6 +77,24 @@ Deno.test(
       createDataRenameDeps(dir);
       assertEquals(await catalogDbExists(dir), true);
     });
+  },
+);
+
+Deno.test(
+  "createDataRenameDeps: uses injectedDefinitionRepo",
+  async () => {
+    const dir = await Deno.makeTempDir({ prefix: "swamp-test-" });
+    try {
+      const injected = new YamlDefinitionRepository(dir);
+      const deps = createDataRenameDeps(dir, undefined, undefined, injected);
+      assertEquals(typeof deps.rename, "function");
+    } finally {
+      if (Deno.build.os === "windows") {
+        await Deno.remove(dir, { recursive: true }).catch(() => {});
+      } else {
+        await Deno.remove(dir, { recursive: true });
+      }
+    }
   },
 );
 
