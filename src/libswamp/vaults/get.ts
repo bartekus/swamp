@@ -22,6 +22,16 @@ import type { LibSwampContext } from "../context.ts";
 import type { SwampError } from "../errors.ts";
 import { notFound, validationFailed } from "../errors.ts";
 
+/** Interface for vault config repositories accepted by createVaultGetDeps. */
+export interface VaultConfigRepository {
+  findByName: (name: string) => Promise<VaultConfigInfo | null>;
+  findById: (
+    type: string,
+    id: string,
+  ) => Promise<VaultConfigInfo | null>;
+  findAll: () => Promise<VaultConfigInfo[]>;
+}
+
 import { withGeneratorSpan } from "../../infrastructure/tracing/mod.ts";
 /**
  * Data structure for the vault get output.
@@ -58,8 +68,12 @@ export interface VaultGetDeps {
 }
 
 /** Wires real infrastructure into VaultGetDeps. */
-export function createVaultGetDeps(repoDir: string): VaultGetDeps {
-  const repo = new YamlVaultConfigRepository(repoDir);
+export function createVaultGetDeps(
+  repoDir: string,
+  injectedVaultConfigRepo?: VaultConfigRepository,
+): VaultGetDeps {
+  const repo = injectedVaultConfigRepo ??
+    new YamlVaultConfigRepository(repoDir);
   return {
     findByName: (name) => repo.findByName(name),
     findById: (type, id) => repo.findById(type, id),

@@ -23,6 +23,7 @@ import { createLibSwampContext } from "../context.ts";
 import {
   createVaultGetDeps,
   type VaultConfigInfo,
+  type VaultConfigRepository,
   vaultGet,
   type VaultGetDeps,
   type VaultGetEvent,
@@ -137,4 +138,37 @@ Deno.test("createVaultGetDeps: storagePath uses vaults/ not .swamp/vault/", () =
     deps.storagePath(config),
     "vaults/local_encryption/abc-123.yaml",
   );
+});
+
+Deno.test("createVaultGetDeps: uses injected repo when provided", async () => {
+  const findByNameCalls: string[] = [];
+  const injectedRepo: VaultConfigRepository = {
+    findByName: (name) => {
+      findByNameCalls.push(name);
+      return Promise.resolve(testVault);
+    },
+    findById: () => Promise.resolve(null),
+    findAll: () => Promise.resolve([]),
+  };
+  const deps = createVaultGetDeps("/tmp/other-repo", injectedRepo);
+  const result = await deps.findByName("my-vault");
+  assertEquals(findByNameCalls, ["my-vault"]);
+  assertEquals(result?.name, "my-vault");
+});
+
+Deno.test("createVaultGetDeps: injected repo is used for vaultGet end-to-end", async () => {
+  const injectedRepo: VaultConfigRepository = {
+    findByName: () => Promise.resolve(testVault),
+    findById: () => Promise.resolve(null),
+    findAll: () => Promise.resolve([]),
+  };
+  const deps = createVaultGetDeps("/tmp/other-repo", injectedRepo);
+  const events = await collect<VaultGetEvent>(
+    vaultGet(createLibSwampContext(), deps, "my-vault"),
+  );
+  assertEquals(events.length, 2);
+  assertEquals(events[0], { kind: "resolving" });
+  const last = events[1] as Extract<VaultGetEvent, { kind: "completed" }>;
+  assertEquals(last.kind, "completed");
+  assertEquals(last.data.name, "my-vault");
 });
