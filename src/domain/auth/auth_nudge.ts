@@ -17,18 +17,17 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with Swamp.  If not, see <https://www.gnu.org/licenses/>.
 
-export const AUTH_NUDGE_MESSAGE =
-  "Tip: Join & participate in the community by logging in to swamp-club.com: swamp auth login";
+export const AUTH_ENFORCEMENT_DEADLINE = "October 1st, 2026";
 
-export const AUTH_FIRST_RUN_MESSAGE_LINES = [
-  "Swamp is better with SWAMP CLUB (swamp-club.com)",
+export const AUTH_WARNING_MESSAGE =
+  `swamp will require authentication from ${AUTH_ENFORCEMENT_DEADLINE}. Run \`swamp auth login\` to authenticate.`;
+
+export const AUTH_WARNING_FIRST_RUN_LINES = [
+  `Authentication required from ${AUTH_ENFORCEMENT_DEADLINE}`,
   "",
-  "Connect your account to unlock:",
-  "  - Submit bug reports and feature requests",
-  "  - Publish extensions to share with the community",
-  "  - Higher rate limits on CLI usage",
+  `Starting ${AUTH_ENFORCEMENT_DEADLINE}, swamp will require authentication.`,
   "",
-  "Get started: swamp auth login",
+  "Sign in now: swamp auth login",
 ] as const;
 
 export interface AuthNudgeState {
@@ -36,14 +35,6 @@ export interface AuthNudgeState {
   firstRunShown?: boolean;
 }
 
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-
 export function isFirstRunNudge(state: AuthNudgeState): boolean {
   return !state.firstRunShown && !state.lastShown;
-}
-
-export function shouldShowAuthNudge(state: AuthNudgeState): boolean {
-  if (!state.lastShown) return true;
-  const lastShown = new Date(state.lastShown).getTime();
-  return Date.now() - lastShown >= ONE_DAY_MS;
 }
