@@ -31,6 +31,7 @@ import {
   hasResourceDependency,
   hasSelfReference,
   hasStepOutputDependency,
+  requiresModelNamespace,
 } from "./dependency_extractor.ts";
 
 Deno.test("extractDependencies finds input dependencies", () => {
@@ -471,4 +472,125 @@ Deno.test("extractModelRefs extracts model.method() alongside data refs", () => 
     'model.method("infra", "check").stdout == "ok" && data.latest("infra", "state").attributes.id';
   const refs = extractModelRefs(expr);
   assertEquals(refs.includes("infra"), true);
+});
+
+// ============================================================================
+// requiresModelNamespace
+// ============================================================================
+
+Deno.test("requiresModelNamespace is false for data with no expressions", () => {
+  assertEquals(requiresModelNamespace({ run: "echo hi" }), false);
+  assertEquals(requiresModelNamespace(undefined), false);
+});
+
+Deno.test("requiresModelNamespace is false for inputs, env, self and steps", () => {
+  assertEquals(
+    requiresModelNamespace({
+      methods: {
+        execute: {
+          arguments: {
+            run: "echo ${{ inputs.msg }} ${{ env.HOME }}",
+            dir: "${{ self.name }}-${{ steps.build.outputs.path }}",
+          },
+        },
+      },
+    }),
+    false,
+  );
+});
+
+Deno.test("requiresModelNamespace is false for data function expressions", () => {
+  assertEquals(
+    requiresModelNamespace({
+      run: 'echo ${{ data.latest("scanner", "state").attributes.id }}',
+    }),
+    false,
+  );
+});
+
+Deno.test("requiresModelNamespace is true for dotted model access", () => {
+  assertEquals(
+    requiresModelNamespace({
+      run: "echo ${{ model.scanner.resource.report.latest.attributes.id }}",
+    }),
+    true,
+  );
+});
+
+Deno.test("requiresModelNamespace is true for bracket model access", () => {
+  assertEquals(
+    requiresModelNamespace({
+      run: 'echo ${{ model["my-scanner"].file.report.latest.path }}',
+    }),
+    true,
+  );
+});
+
+Deno.test("requiresModelNamespace is true for file.contents()", () => {
+  assertEquals(
+    requiresModelNamespace({
+      run: 'cat ${{ file.contents("scanner", "report") }}',
+    }),
+    true,
+  );
+});
+
+Deno.test("requiresModelNamespace is true for model.method()", () => {
+  assertEquals(
+    requiresModelNamespace({
+      guard: '${{ model.method("infra", "check").exitCode == 0 }}',
+    }),
+    true,
+  );
+});
+
+Deno.test("requiresModelNamespace inspects nested objects and arrays", () => {
+  assertEquals(
+    requiresModelNamespace({
+      jobs: [
+        { steps: [{ inputs: { path: "${{ inputs.path }}" } }] },
+        { steps: [{ inputs: { id: "${{ model.other.input.name }}" } }] },
+      ],
+    }),
+    true,
+  );
+});
+
+Deno.test("requiresModelNamespace ignores namespace names outside expressions", () => {
+  assertEquals(
+    requiresModelNamespace({ description: "reads model.foo.resource at run" }),
+    false,
+  );
+});
+
+Deno.test("requiresModelNamespace is true for a bare namespace value", () => {
+  // `has(model)` never reaches a `.` or `[`, so a pattern anchored on those
+  // would evaluate a real model read against an empty namespace.
+  assertEquals(
+    requiresModelNamespace({ if: "${{ has(model) }}" }),
+    true,
+  );
+  assertEquals(
+    requiresModelNamespace({ if: "${{ size(file) > 0 }}" }),
+    true,
+  );
+});
+
+Deno.test("requiresModelNamespace is false for a property that shares the name", () => {
+  assertEquals(
+    requiresModelNamespace({ with: { name: "${{ inputs.model }}" } }),
+    false,
+  );
+  assertEquals(
+    requiresModelNamespace({ with: { name: "${{ data.model.id }}" } }),
+    false,
+  );
+  assertEquals(
+    requiresModelNamespace({ with: { name: "${{ inputs.model_name }}" } }),
+    false,
+  );
+  assertEquals(
+    requiresModelNamespace({ with: { name: "${{ inputs.mymodel }}" } }),
+    false,
+  );
 });
