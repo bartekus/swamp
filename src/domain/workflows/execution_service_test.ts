@@ -81,9 +81,11 @@ async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
 class MockStepExecutor implements StepExecutor {
   executedSteps: string[] = [];
   shouldFail: Set<string> = new Set();
+  authoredByStep = new Map<string, ReadonlySet<string>>();
 
   execute(step: Step, ctx: StepExecutionContext): Promise<unknown> {
     this.executedSteps.push(`${ctx.jobName}/${ctx.stepName}`);
+    this.authoredByStep.set(ctx.stepName, ctx.authoredExpressions);
 
     if (this.shouldFail.has(step.name)) {
       return Promise.reject(new Error(`Step ${step.name} failed`));
@@ -1542,6 +1544,7 @@ Deno.test("DefaultStepExecutor rejects workflow task type", async () => {
     repoDir: "/tmp",
     signal: new AbortController().signal,
     catalogStore,
+    authoredExpressions: new Set(),
   };
 
   await assertRejects(
@@ -1629,6 +1632,75 @@ Deno.test("workflow step applies child workflow's input defaults", async () => {
       }`,
     );
     assertEquals(executor.executedSteps.includes("job1/child-step"), true);
+  });
+});
+
+Deno.test("workflow step carries parent-authored runtime expressions into the child's provenance", async () => {
+  await withTempDir(async (tempDir) => {
+    const workflowRepo = new InMemoryWorkflowRepository();
+    const runRepo = new InMemoryWorkflowRunRepository();
+    const executor = new MockStepExecutor();
+
+    const childWorkflow = Workflow.create({
+      name: "child-workflow",
+      inputs: { properties: { home: { type: "string" } } },
+      jobs: [
+        Job.create({
+          name: "job1",
+          steps: [
+            Step.create({
+              name: "child-step",
+              task: StepTask.modelMethod("some-model", "run", {
+                home: "${{ inputs.home }}",
+              }),
+            }),
+          ],
+        }),
+      ],
+    });
+    await workflowRepo.save(childWorkflow);
+
+    // The parent author writes a runtime expression as a child input. It
+    // survives the parent's evaluation unresolved and must be admitted in
+    // the child, while data content shaped like an expression must not be.
+    const parentWorkflow = Workflow.create({
+      name: "parent-workflow",
+      jobs: [
+        Job.create({
+          name: "job1",
+          steps: [
+            Step.create({
+              name: "call-child",
+              task: StepTask.workflow("child-workflow", {
+                home: "${{ env.HOME }}",
+              }),
+            }),
+          ],
+        }),
+      ],
+    });
+    await workflowRepo.save(parentWorkflow);
+
+    const catalogStore = new CatalogStore(join(tempDir, "_catalog.db"));
+    const service = new WorkflowExecutionService(
+      workflowRepo,
+      runRepo,
+      tempDir,
+      executor,
+      undefined,
+      catalogStore,
+    );
+
+    const failures: string[] = [];
+    for await (const event of service.run(parentWorkflow.name)) {
+      if (event.kind === "step_failed") failures.push(event.error);
+    }
+    assertEquals(failures, []);
+
+    const childAuthored = executor.authoredByStep.get("child-step");
+    assertEquals(childAuthored?.has("${{ env.HOME }}"), true);
+    assertEquals(childAuthored?.has("${{ inputs.home }}"), true);
+    assertEquals(childAuthored?.has("${{ vault.get('injected') }}"), false);
   });
 });
 
@@ -3183,6 +3255,7 @@ Deno.test("DefaultStepExecutor wires dataQueryService into MethodContext", async
         signal: new AbortController().signal,
         step,
         catalogStore,
+        authoredExpressions: new Set(),
       };
 
       const executor = new DefaultStepExecutor();
@@ -3626,6 +3699,7 @@ Deno.test({
               region: "us-east-1",
             },
           },
+          authoredExpressions: new Set(["${{ self.region }}"]),
           forEachVariable: { name: "region", value: "us-east-1" },
           catalogStore,
         };
@@ -4522,10 +4596,12 @@ Deno.test("guard: model.method() guard skips step when method returns truthy", a
 
     class TruthyMethodExecutor implements StepExecutor {
       executedSteps: string[] = [];
+      guardAuthored: ReadonlySet<string> | undefined;
 
       execute(_step: Step, ctx: StepExecutionContext): Promise<unknown> {
         this.executedSteps.push(`${ctx.jobName}/${ctx.stepName}`);
         if (ctx.stepName.startsWith("__guard_")) {
+          this.guardAuthored = ctx.authoredExpressions;
           return Promise.resolve({ exists: true });
         }
         return Promise.resolve({ executed: true });
@@ -4573,6 +4649,12 @@ Deno.test("guard: model.method() guard skips step when method returns truthy", a
     );
     assertEquals(events.length, 1);
     assertEquals(events[0].reason, "guarded");
+    // The guard's model.method() call runs with the workflow's provenance, so
+    // authored expressions in its inputs resolve instead of arriving literal.
+    assertEquals(
+      executor.guardAuthored?.has('${{ model.method("infra", "exists") }}'),
+      true,
+    );
   });
 });
 
@@ -5708,6 +5790,7 @@ Deno.test({
           signal: new AbortController().signal,
           step,
           catalogStore,
+          authoredExpressions: new Set(),
         };
 
         await executor.execute(step, ctx);

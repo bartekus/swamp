@@ -18,7 +18,11 @@
 // along with Swamp.  If not, see <https://www.gnu.org/licenses/>.
 
 import { extractExpressions, replaceExpressions } from "./expression_parser.ts";
-import { containsRuntimeExpression } from "./expression_evaluation_service.ts";
+import {
+  type AuthoredExpressions,
+  containsRuntimeExpression,
+  partitionAuthored,
+} from "./expression_evaluation_service.ts";
 import { hasStepOutputDependency } from "./dependency_extractor.ts";
 
 /**
@@ -66,8 +70,13 @@ export function resolveAvailableExpressions(
   data: unknown,
   context: Record<string, unknown>,
   evaluate: SyncCelEvaluator,
+  authored: AuthoredExpressions,
+  skipPath?: (path: string) => boolean,
 ): unknown {
-  const locations = extractExpressions(data);
+  const locations = partitionAuthored(
+    extractExpressions(data, "", skipPath),
+    authored,
+  );
   if (locations.length === 0) return data;
 
   const values = new Map<string, unknown>();
@@ -86,5 +95,5 @@ export function resolveAvailableExpressions(
   }
 
   if (values.size === 0) return data;
-  return replaceExpressions(data, values);
+  return replaceExpressions(data, values, skipPath);
 }
