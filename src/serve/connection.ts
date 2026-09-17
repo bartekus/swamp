@@ -154,6 +154,7 @@ import {
   handleServeReload,
   handleVaultMigrate,
   handleWorkerList,
+  handleWorkerPrune,
   handleWorkerQueueList,
   handleWorkerTokenCreate,
   handleWorkerTokenList,
@@ -863,6 +864,15 @@ const WorkerVerifyRequestSchema = z.object({
   }).optional(),
 });
 
+const WorkerPruneRequestSchema = z.object({
+  type: z.literal("worker.prune"),
+  id: z.string().min(1).max(256),
+  payload: z.object({
+    gracePeriodMs: z.number().int().positive().optional(),
+    dryRun: z.boolean().optional(),
+  }).optional(),
+});
+
 const DatastoreStatusRequestSchema = z.object({
   type: z.literal("datastore.status"),
   id: z.string().min(1).max(256),
@@ -1322,6 +1332,7 @@ const ServerRequestSchema = z.discriminatedUnion("type", [
   WorkerListRequestSchema,
   WorkerQueueListRequestSchema,
   WorkerVerifyRequestSchema,
+  WorkerPruneRequestSchema,
   DatastoreStatusRequestSchema,
   DatastoreSetupExtensionRequestSchema,
   VaultMigrateRequestSchema,
@@ -2935,6 +2946,19 @@ export function handleMessage(
     case "worker.verify":
       task = audited(
         handleWorkerVerify(
+          socket,
+          ctx,
+          request.id,
+          request.payload,
+          controller,
+          principal,
+        ),
+        auditOpts("admin", "worker", "*"),
+      );
+      break;
+    case "worker.prune":
+      task = audited(
+        handleWorkerPrune(
           socket,
           ctx,
           request.id,
