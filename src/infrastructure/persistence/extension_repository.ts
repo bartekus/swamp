@@ -319,6 +319,7 @@ export class ExtensionRepository {
       "vault",
       "datastore",
       "report",
+      "webhook",
     ];
     try {
       this.catalog.runInTransaction(() => {
@@ -352,6 +353,7 @@ export class ExtensionRepository {
       "vault",
       "datastore",
       "report",
+      "webhook",
     ];
     for (const kind of kinds) {
       if (!this.catalog.isPopulated(kind)) return true;
@@ -505,7 +507,11 @@ export class ExtensionRepository {
     let version: string | null = row.extension_version ?? null;
 
     if (!hasName && !hasVersion) {
-      const derived = deriveExtensionIdentity(row.source_path, this.repoRoot);
+      const derived = deriveExtensionIdentity(
+        row.source_path,
+        this.repoRoot,
+        Object.keys(this.lockfileRepository.getAllEntries()),
+      );
       if (derived === null) {
         if (pruneOrphans) {
           logger
