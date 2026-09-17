@@ -54,13 +54,16 @@ attestation to flow through.
    `git diff --stat main..HEAD`. Build a title and summary from the commits and
    changed files.
 
-2. **Create a tracking issue in swamp-club:**
+2. **Create a tracking issue in swamp-club.** There is no `swamp issue create` —
+   pick the type-specific subcommand (`feature`, `bug`, or `security`). The CLI
+   cannot file `platform` issues, so classify ad-hoc work as `feature` or `bug`:
 
    ```
-   swamp issue create --title "<title>" --body "<summary of work done>" --type platform
+   swamp issue feature --title "<title>" --body "<summary of work done>" --json
    ```
 
-   Capture the issue number from the output.
+   Read `number` from the JSON output — that is `<N>` in every command below.
+   `--body` requires `--title`; without both, the command opens an editor.
 
 3. **Start the lifecycle:**
 
@@ -81,9 +84,26 @@ attestation to flow through.
    describe a logical unit of change with its files. The testing strategy should
    reflect how the changes were validated.
 
-5. **Proceed with normal verification.** Read
-   [references/verification.md](references/verification.md) and continue the
-   standard verify → post_attestation → link_pr flow.
+5. **Transition to `verifying`.** `fast_forward` leaves the lifecycle at
+   `implementing`, and `post_attestation` is only accepted from `verifying` — so
+   this transition is required, not optional:
+
+   ```
+   swamp model @swamp/issue-lifecycle method run verify issue-<N> \
+     --input commit=$(git rev-parse HEAD) \
+     --input branch=$(git branch --show-current)
+   ```
+
+6. **Proceed with normal verification.** Read
+   [references/verification.md](references/verification.md) and continue from
+   its step 2 (Run Verification) through verification_passed → post_attestation
+   → link_pr. Step 1 there is the `verify` call just made — do not repeat it.
+
+7. **Drive the lifecycle to `done`.** `link_pr` only reaches `pr_open` — it is
+   not the end of the flow, and stopping there leaves the issue parked. Walk the
+   rest: `pr_merged` (→ `releasing`), `ship` or `complete` (→ `notify`),
+   `notify` or `skip_notify` (→ `summarizing`), then `summarize` (→ `done`). See
+   "Closing Out a Shipped Issue" below for the exact commands.
 
 ### Example
 
@@ -92,14 +112,16 @@ User: prepare to ship this work
 
 Agent:
 1. git log main..HEAD → "Add retry logic to HTTP client"
-2. swamp issue create --title "Add retry logic to HTTP client" --body "..." --type platform
-   → issue #247
+2. swamp issue feature --title "Add retry logic to HTTP client" --body "..." --json
+   → {"number": 247, ...}
 3. swamp model @swamp/issue-lifecycle method run start issue-247 --input issueNumber=247
 4. swamp model @swamp/issue-lifecycle method run fast_forward issue-247 \
      --input summary="Add exponential backoff retry to HTTP client" \
      --input steps='[{"order":1,"description":"Add retry wrapper","files":["src/http/client.ts"]}]' \
      --input testingStrategy="Unit tests for retry logic added in client_test.ts"
-5. Proceed to verification...
+5. swamp model @swamp/issue-lifecycle method run verify issue-247 \
+     --input commit=$(git rev-parse HEAD) --input branch=$(git branch --show-current)
+6. Proceed to verification (references/verification.md, from step 2)...
 ```
 
 ## Repository Configuration
@@ -210,8 +232,16 @@ Read [references/implementation.md](references/implementation.md) — section 7
 covers the summary step.
 
 Restate the original problem and the delivered outcome in plain language, then
-call `summarize` to close out the lifecycle. This final check ensures the work
-actually addressed the issue.
+close out the lifecycle. This final check ensures the work actually addressed
+the issue. All three inputs are required — `summarize` fails validation without
+them:
+
+```
+swamp model @swamp/issue-lifecycle method run summarize issue-<N> \
+  --input originalProblem="<problem>" \
+  --input deliveredOutcome="<outcome>" \
+  --input outcomeMet=true
+```
 
 ## Classification Types
 
@@ -222,6 +252,11 @@ swamp-club):
 - `feature` — a request for new functionality or enhancement
 - `platform` — admin-only platform infrastructure work
 - `security` — security vulnerability or hardening work
+
+`platform` is accepted by the `triage` method, but the CLI can neither file nor
+switch an issue to it — `swamp issue bug|feature|security` and
+`swamp issue edit --type` accept only the other three. Classify an existing
+issue as `platform` if it fits; never try to create one.
 
 Two additional classification details are captured in the classification record
 but do NOT map to separate swamp-club types:
@@ -272,7 +307,7 @@ Use this table to determine what to do next:
 | `pr_failed`      | Fix the issue, then `link_pr` (new PR) or `implement` (major rework)       |
 | `releasing`      | Check release build: `ship` when done, or `complete` as fallback           |
 | `notify`         | Check if author is external: `notify` to thank them, `skip_notify` to skip |
-| `summarizing`    | Call `summarize` with the problem restatement and delivered outcome        |
+| `summarizing`    | Call `summarize` — needs originalProblem, deliveredOutcome, outcomeMet     |
 | `done`           | Nothing to do — lifecycle is complete                                      |
 
 The canonical phase list lives in the `TRANSITIONS` constant in
