@@ -24,6 +24,7 @@ import type { YamlDefinitionRepository } from "../../infrastructure/persistence/
 import { CelEvaluator } from "../../infrastructure/cel/cel_evaluator.ts";
 import {
   containsExpression,
+  extractCelExpression,
   extractExpressions,
   replaceExpressions,
 } from "./expression_parser.ts";
@@ -49,6 +50,13 @@ import {
   type GraphNode,
   TopologicalSortService,
 } from "../workflows/topological_sort_service.ts";
+
+import {
+  captureDeferredBindings,
+  type DeferredExpression,
+  deferredExpressionReference,
+  isDeferredExpression,
+} from "./deferred_expression.ts";
 
 /**
  * Pattern to detect vault.get() references inside a CEL expression.
@@ -182,7 +190,8 @@ export function containsEnvExpression(celExpression: string): boolean {
  * and skipped during the persist phase.
  */
 export function containsRuntimeExpression(celExpression: string): boolean {
-  return containsVaultExpression(celExpression) ||
+  return isDeferredExpression(celExpression) ||
+    containsVaultExpression(celExpression) ||
     containsEnvExpression(celExpression);
 }
 
@@ -228,6 +237,22 @@ export function collectAuthoredExpressions(
     into.add(expr.raw);
   }
   return into;
+}
+
+/** Binding paths (`inputs.home`, `self`, `steps.a.outputs`) a CEL expression reads. */
+function referencedBindingPaths(cel: string): string[] {
+  return [
+    ...cel.matchAll(/\b(inputs|self|run|steps)((?:\.[A-Za-z0-9_]+|\[\d+\])*)/g),
+  ]
+    .map((m) => m[1] + m[2]);
+}
+
+/** True when one path is the other or an ancestor of it. */
+function overlaps(a: string, b: string): boolean {
+  const under = (path: string, root: string) =>
+    path === root || path.startsWith(root + ".") ||
+    path.startsWith(root + "[");
+  return under(a, b) || under(b, a);
 }
 
 /**
@@ -373,13 +398,16 @@ export class ExpressionEvaluationService {
   async buildRuntimeContext(
     definition: Definition,
     inputs?: Record<string, unknown>,
+    deferredExpressions: readonly DeferredExpression[] = [],
   ): Promise<ExpressionContext> {
-    const ctx = requiresModelNamespace(definition.toData())
-      ? await this.modelResolver.buildContext()
-      : this.modelResolver.buildLightContext();
+    const ctx =
+      requiresModelNamespace([definition.toData(), deferredExpressions])
+        ? await this.modelResolver.buildContext()
+        : this.modelResolver.buildLightContext();
     if (inputs) {
       ctx.inputs = inputs;
     }
+    ctx.deferredExpressions = deferredExpressions;
     return ctx;
   }
 
@@ -481,6 +509,29 @@ export class ExpressionEvaluationService {
     );
 
     return { definition: evaluatedDefinition, type, hadExpressions: true };
+  }
+
+  /** Replace parent-authored runtime input expressions with scoped references. */
+  deferChildInputs(
+    data: unknown,
+    context: ExpressionContext,
+    authored: AuthoredExpressions,
+    omitBindings: readonly string[] = [],
+  ) {
+    const deferredExpressions = [...(context.deferredExpressions ?? [])];
+    const values = new Map<string, unknown>();
+    let bindings: DeferredExpression["bindings"] | undefined;
+    for (const expr of partitionAuthored(extractExpressions(data), authored)) {
+      if (
+        !containsRuntimeExpression(expr.celExpression) ||
+        isDeferredExpression(expr.celExpression) || values.has(expr.raw)
+      ) continue;
+      const id = crypto.randomUUID();
+      bindings ??= captureDeferredBindings(context, omitBindings);
+      deferredExpressions.push({ id, expression: expr.raw, bindings });
+      values.set(expr.raw, deferredExpressionReference(id));
+    }
+    return { data: replaceExpressions(data, values), deferredExpressions };
   }
 
   /**
@@ -848,7 +899,7 @@ export class ExpressionEvaluationService {
     );
   }
 
-  /** Resolve runtime expressions with fresh runtime services. */
+  /** Resolve registered references with parent bindings and fresh runtime services. */
   private async resolveRuntimeData(
     data: unknown,
     expressions: ExpressionLocation[],
@@ -856,15 +907,85 @@ export class ExpressionEvaluationService {
     redactor: SecretRedactor | undefined,
     secretBag: VaultSecretBag,
   ): Promise<unknown> {
-    const values = new Map<string, unknown>();
-    for (const expr of expressions) {
+    const records = new Map(
+      (context.deferredExpressions ?? []).map((
+        record,
+      ) => [deferredExpressionReference(record.id), record]),
+    );
+    const resolvedReferences = new Map<string, unknown>();
+    const resolving = new Set<string>();
+    // Only the bindings an expression reads are resolved, so an unused
+    // reference (a missing env var or vault key in another input) never
+    // becomes a dependency of this expression. Resolved references are
+    // memoized, so re-substituting per expression is cheap.
+    const withBindings = async (
+      ctx: ExpressionContext,
+      cel: string,
+    ): Promise<ExpressionContext> => {
+      const { inputs, self, run, steps } = ctx;
+      return {
+        ...ctx,
+        ...await resolveBindings({ inputs, self, run, steps }, cel) as object,
+      };
+    };
+
+    const resolveBindings = async (
+      bindings: unknown,
+      cel: string,
+    ): Promise<unknown> => {
+      const read = referencedBindingPaths(cel);
+      const values = new Map<string, unknown>();
+      for (const expr of extractExpressions(bindings)) {
+        if (
+          records.has(expr.raw) &&
+          read.some((path) => overlaps(path, expr.path))
+        ) {
+          values.set(expr.raw, await resolve(expr, context));
+        }
+      }
+      return replaceExpressions(bindings, values);
+    };
+    const resolve = async (
+      expr: ExpressionLocation,
+      ctx: ExpressionContext,
+    ): Promise<unknown> => {
+      const record = records.get(expr.raw);
+      if (record) {
+        if (resolvedReferences.has(expr.raw)) {
+          return resolvedReferences.get(expr.raw);
+        }
+        if (resolving.has(expr.raw)) {
+          throw new Error("Cyclic deferred expression scope");
+        }
+        resolving.add(expr.raw);
+        const bindings = await resolveBindings(
+          record.bindings,
+          extractCelExpression(record.expression) ?? "",
+        ) as typeof record.bindings;
+        const value = await resolve(extractExpressions(record.expression)[0], {
+          ...context,
+          // Omitted parent bindings stay absent; never borrow the child's scope.
+          inputs: bindings.inputs,
+          self: bindings.self,
+          run: bindings.run,
+          workflowRunId: bindings.workflowRunId,
+          steps: bindings.steps,
+        });
+        resolving.delete(expr.raw);
+        resolvedReferences.set(expr.raw, value);
+        return value;
+      }
+      if (isDeferredExpression(expr.celExpression)) return expr.raw;
+      const celContext = records.size
+        ? await withBindings(ctx, expr.celExpression)
+        : ctx;
       let cel = expr.celExpression;
       if (containsVaultExpression(cel)) {
         cel = await this.modelResolver.resolveVaultExpressions(
           cel,
           redactor,
           secretBag,
-          { celEvaluator: this.celEvaluator, context },
+          { celEvaluator: this.celEvaluator, context: celContext },
         );
       }
       const validation = this.celEvaluator.validate(cel);
@@ -874,9 +995,14 @@ export class ExpressionEvaluationService {
             `Skipped vault expression at ${expr.path} because its CEL is syntactically invalid after vault resolution: ${validation.error}. Raw: ${expr.raw}`,
           );
         }
-        continue;
+        return expr.raw;
       }
-      values.set(expr.raw, await this.celEvaluator.evaluateAsync(cel, context));
+      return await this.celEvaluator.evaluateAsync(cel, celContext);
+    };
+
+    const values = new Map<string, unknown>();
+    for (const expr of expressions) {
+      values.set(expr.raw, await resolve(expr, context));
     }
     return replaceExpressions(data, values);
   }
